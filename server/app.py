@@ -1,27 +1,15 @@
 """
 FastAPI server for the Email Triage OpenEnv environment.
-
-Endpoints
-─────────
-POST /reset          → start new episode
-POST /step           → submit action for current email
-GET  /state          → current episode state
-GET  /tasks          → list tasks + action schemas
-POST /grader         → score a single action without advancing state
-GET  /baseline       → run baseline agent on all 3 tasks (slow)
-GET  /health         → liveness check
-GET  /               → welcome + links
+Fixed: /reset body is now fully optional (validator sends no body).
 """
 from __future__ import annotations
 import os
 import sys
 import time
-import json
 
-# Make repo root importable
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
@@ -34,10 +22,6 @@ from data import TASK_EMAILS, EMAIL_BY_ID
 from graders import grade
 from server.environment import EmailTriageEnvironment
 
-# ─────────────────────────────────────────────
-# App & global env instance
-# ─────────────────────────────────────────────
-
 app = FastAPI(
     title="Email Triage OpenEnv",
     description="A real-world email triage environment for AI agent training.",
@@ -46,15 +30,10 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-# One shared environment instance per server process.
-# For concurrent use, instantiate per-session (see notes in README).
 _env = EmailTriageEnvironment()
-_last_episode_scores: dict[str, float] = {}
 
 
-# ─────────────────────────────────────────────
-# Request / Response models
-# ─────────────────────────────────────────────
+# ── Request / Response models ────────────────────────────────────
 
 class ResetRequest(BaseModel):
     task_id: str = "task_classify"
@@ -71,14 +50,12 @@ class GraderRequest(BaseModel):
 
 
 class BaselineResponse(BaseModel):
-    scores: dict[str, float]
+    scores: dict
     mean_score: float
     details: dict
 
 
-# ─────────────────────────────────────────────
-# Endpoints
-# ─────────────────────────────────────────────
+# ── Endpoints ────────────────────────────────────────────────────
 
 @app.get("/")
 def root():
@@ -96,8 +73,14 @@ def health():
 
 
 @app.post("/reset", response_model=EmailObservation)
-def reset(body: ResetRequest):
-    """Start a new episode for the given task."""
+async def reset(body: Optional[ResetRequest] = None):
+    """
+    Start a new episode.
+    Body is fully optional — if omitted, defaults to task_classify.
+    Accepts: no body, empty body {}, or {"task_id": "task_triage"}
+    """
+    if body is None:
+        body = ResetRequest()
     try:
         obs = _env.reset(task_id=body.task_id)
         return obs
@@ -131,21 +114,14 @@ def state():
 
 @app.get("/tasks")
 def tasks():
-    """
-    Return all available tasks with their action schema.
-    The action schema describes exactly which fields an agent must populate.
-    """
+    """Return all available tasks with their action schemas."""
     return {
         "tasks": [
             {
                 "task_id": "task_classify",
                 "name": "Email Classification",
                 "difficulty": "easy",
-                "description": (
-                    "Classify each email into one of the predefined categories. "
-                    "The agent must correctly identify spam, work, personal, newsletter, "
-                    "finance, and support emails."
-                ),
+                "description": "Classify each email into one of 6 categories.",
                 "num_emails": len(TASK_EMAILS["task_classify"]),
                 "action_schema": {
                     "action_type": "classify",
@@ -153,16 +129,13 @@ def tasks():
                     "optional_fields": [],
                     "category_options": [e.value for e in EmailCategory],
                 },
-                "scoring": "1.0 = correct category, 0.5 = adjacent class, 0.0 = spam/non-spam confusion",
+                "scoring": "1.0=correct, 0.5=adjacent class, 0.0=spam confusion",
             },
             {
                 "task_id": "task_triage",
                 "name": "Email Triage",
                 "difficulty": "medium",
-                "description": (
-                    "Classify the email, assign urgency priority, and suggest a one-line action. "
-                    "Partial credit is awarded for each correct sub-field."
-                ),
+                "description": "Classify + set priority + suggest action.",
                 "num_emails": len(TASK_EMAILS["task_triage"]),
                 "action_schema": {
                     "action_type": "triage",
@@ -171,17 +144,13 @@ def tasks():
                     "category_options": [e.value for e in EmailCategory],
                     "priority_options": [p.value for p in EmailPriority],
                 },
-                "scoring": "Weighted: category 30% + priority 40% + suggested_action 30%",
+                "scoring": "category 30% + priority 40% + suggested_action 30%",
             },
             {
                 "task_id": "task_full_triage",
                 "name": "Full Email Triage",
                 "difficulty": "hard",
-                "description": (
-                    "Full triage pipeline: classify, set priority, suggest action, "
-                    "extract structured action items, and draft a short reply. "
-                    "Agents are evaluated on all five dimensions."
-                ),
+                "description": "Full 5-field triage: category + priority + action + items + reply.",
                 "num_emails": len(TASK_EMAILS["task_full_triage"]),
                 "action_schema": {
                     "action_type": "full_triage",
@@ -190,12 +159,8 @@ def tasks():
                         "action_items", "draft_reply",
                     ],
                     "optional_fields": [],
-                    "field_descriptions": {
-                        "action_items": "List of concrete next steps extracted from the email",
-                        "draft_reply": "Short reply draft (<500 chars) to the sender",
-                    },
                 },
-                "scoring": "Weighted: triage 40% + action_items 35% + draft_reply 25%",
+                "scoring": "triage 40% + action_items 35% + draft_reply 25%",
             },
         ]
     }
@@ -203,10 +168,7 @@ def tasks():
 
 @app.post("/grader", response_model=GraderResult)
 def grader(body: GraderRequest):
-    """
-    Score a single (email_id, action) pair without advancing episode state.
-    Useful for unit-testing your agent's output.
-    """
+    """Score a single action without advancing episode state."""
     if body.email_id not in EMAIL_BY_ID:
         raise HTTPException(status_code=404, detail=f"email_id '{body.email_id}' not found.")
     if body.task_id not in TASK_EMAILS:
@@ -225,11 +187,7 @@ def grader(body: GraderRequest):
 
 @app.get("/baseline")
 def baseline():
-    """
-    Run the rule-based baseline agent on all 3 tasks and return scores.
-    This endpoint mirrors the standalone baseline.py script.
-    WARNING: This resets the shared environment state.
-    """
+    """Run baseline agent on all 3 tasks and return scores."""
     from baseline import run_baseline_in_process
     scores, details = run_baseline_in_process()
     mean = round(sum(scores.values()) / len(scores), 4)
