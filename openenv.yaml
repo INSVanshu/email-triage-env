@@ -1,0 +1,155 @@
+name: email-triage-env
+version: "1.0.0"
+description: >
+  A real-world email triage environment for training AI agents to classify,
+  prioritise, extract action items from, and draft replies to emails.
+  Simulates the daily inbox management task that knowledge workers perform.
+
+author: "OpenEnv Hackathon Submission"
+tags:
+  - openenv
+  - email
+  - triage
+  - nlp
+  - real-world
+  - classification
+
+# ── OpenEnv spec compliance ──────────────────────────────────────
+
+interface:
+  endpoints:
+    reset:
+      method: POST
+      path: /reset
+      description: Start a new episode. Returns the first EmailObservation.
+    step:
+      method: POST
+      path: /step
+      description: Submit a TriageAction. Returns observation, reward, done, info.
+    state:
+      method: GET
+      path: /state
+      description: Return the current TriageState (episode metadata).
+    tasks:
+      method: GET
+      path: /tasks
+      description: List all tasks and their action schemas.
+    grader:
+      method: POST
+      path: /grader
+      description: Score a single action without advancing state.
+    baseline:
+      method: GET
+      path: /baseline
+      description: Run baseline agent on all 3 tasks and return scores.
+
+# ── Tasks ────────────────────────────────────────────────────────
+
+tasks:
+  - id: task_classify
+    name: "Email Classification"
+    difficulty: easy
+    description: >
+      The agent receives emails one at a time and must assign each to one of
+      six categories: spam, work, personal, newsletter, finance, or support.
+    num_emails: 5
+    max_score: 1.0
+    expected_baseline_score: 0.74
+
+  - id: task_triage
+    name: "Email Triage"
+    difficulty: medium
+    description: >
+      In addition to classifying each email, the agent must assign a priority
+      (high / medium / low) and suggest a one-line recommended action.
+      Partial credit is awarded for each correctly handled sub-field.
+    num_emails: 6
+    max_score: 1.0
+    expected_baseline_score: 0.60
+
+  - id: task_full_triage
+    name: "Full Email Triage"
+    difficulty: hard
+    description: >
+      Full five-field triage: category + priority + suggested action +
+      structured action items + short draft reply.  The agent must also
+      correctly avoid drafting replies for spam / newsletters.
+    num_emails: 10
+    max_score: 1.0
+    expected_baseline_score: 0.50
+
+# ── Observation space ────────────────────────────────────────────
+
+observation_space:
+  type: EmailObservation
+  fields:
+    email_id:         { type: string,  description: "Unique email identifier" }
+    subject:          { type: string,  description: "Email subject line" }
+    sender:           { type: string,  description: "Sender email address" }
+    body:             { type: string,  description: "Plain-text email body" }
+    thread_length:    { type: integer, description: "Number of messages in thread" }
+    reward:           { type: float,   range: [0.0, 1.0], description: "Step-level reward" }
+    done:             { type: boolean, description: "True when episode ends" }
+    success:          { type: boolean, description: "Whether the last action was valid" }
+    emails_remaining: { type: integer, description: "Emails left in this episode" }
+    cumulative_score: { type: float,   range: [0.0, 1.0], description: "Running episode score" }
+    feedback:         { type: string,  description: "Human-readable feedback on the last action" }
+
+# ── Action space ─────────────────────────────────────────────────
+
+action_space:
+  type: TriageAction
+  fields:
+    action_type:
+      type: enum
+      values: [classify, triage, full_triage]
+      description: "Which triage operation to perform"
+    category:
+      type: enum
+      values: [spam, work, personal, newsletter, finance, support, unknown]
+      description: "Email category label"
+    priority:
+      type: enum
+      values: [high, medium, low]
+      description: "Urgency level (required for triage / full_triage)"
+      required_for: [triage, full_triage]
+    suggested_action:
+      type: string
+      max_length: 200
+      description: "One-line recommended next step"
+      required_for: [triage, full_triage]
+    action_items:
+      type: list[string]
+      description: "Structured bullet-point action items from the email"
+      required_for: [full_triage]
+    draft_reply:
+      type: string
+      max_length: 500
+      description: "Short draft reply to the sender (empty for spam/newsletter)"
+      required_for: [full_triage]
+
+# ── Reward ───────────────────────────────────────────────────────
+
+reward:
+  range: [0.0, 1.0]
+  type: dense
+  description: >
+    Per-step reward based on action quality.
+    task_classify:    correct category = 1.0, adjacent = 0.5, spam confusion = 0.0
+    task_triage:      category 30% + priority 40% + suggested_action 30%
+    task_full_triage: triage 40% + action_items 35% + draft_reply 25%
+  penalties:
+    - "Repeated identical action on same email: -0.15 per repeat"
+    - "Wrong action_type for task: -0.0 (auto-corrected but noted)"
+    - "No suggested_action on HIGH priority email: -0.20"
+    - "Non-empty draft_reply for spam email: -score on reply component"
+
+# ── Deployment ───────────────────────────────────────────────────
+
+deployment:
+  framework: fastapi
+  python: ">=3.10"
+  port: 7860
+  health_endpoint: /health
+  dockerfile: Dockerfile
+  huggingface_space: true
