@@ -9,9 +9,10 @@ description = "A real-world email triage OpenEnv environment for AI agent traini
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
-keywords = ["openenv", "reinforcement-learning", "email", "triage", "nlp", "agent"]
+keywords = ["openenv", "reinforcement-learning", "email", "triage", "nlp"]
 
 dependencies = [
+    "openenv-core>=0.2.0",
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.29.0",
     "pydantic>=2.6.0",
@@ -24,11 +25,10 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
-    "httpx>=0.27.0",
 ]
 
 [project.scripts]
-email-triage-env = "server.app:app"
+server = "server.app:app"
 
 [tool.setuptools.packages.find]
 where = ["."]
