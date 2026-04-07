@@ -1,6 +1,6 @@
 """
 inference.py – Hackathon submission inference script.
-Follows the required structured logging format: START / STEP / END
+Follows the required structured logging format: [START] / [STEP] / [END]
 Uses OpenAI client configured via environment variables.
 """
 import os
@@ -139,60 +139,71 @@ def _rule_fallback(task_id: str, obs: dict) -> dict:
 def run_episode(task_id: str) -> float:
     """
     Run one full episode against the environment server.
-    Logs in the required START / STEP / END structured format.
+    Logs in the required [START] / [STEP] / [END] structured format.
     """
-
-    # ── START ────────────────────────────────────────────────────
-    print(json.dumps({
-        "type":    "START",
-        "task_id": task_id,
-        "model":   MODEL_NAME,
-        "env_url": API_BASE_URL,
-    }))
-
-    # Reset environment
-    obs = env_request("/reset", method="POST", body={"task_id": task_id})
     step_num = 0
+    rewards = []
+    last_error = None
 
-    while not obs.get("done", False):
-        step_num += 1
+    # ── [START] ──────────────────────────────────────────────────
+    print(f"[START] task={task_id} env={API_BASE_URL} model={MODEL_NAME}", flush=True)
 
-        # Get LLM action
-        action = llm_action(task_id, obs)
+    try:
+        # Reset environment
+        obs = env_request("/reset", method="POST", body={"task_id": task_id})
 
-        # Submit to environment
-        result = env_request("/step", method="POST", body={"action": action})
-        reward  = result.get("reward", 0.0)
-        obs     = result.get("observation", result)
-        done    = result.get("done", obs.get("done", False))
+        while not obs.get("done", False):
+            step_num += 1
 
-        # ── STEP ─────────────────────────────────────────────────
-        print(json.dumps({
-            "type":       "STEP",
-            "task_id":    task_id,
-            "step":       step_num,
-            "email_id":   obs.get("email_id", ""),
-            "action":     action,
-            "reward":     round(reward, 4),
-            "done":       done,
-            "feedback":   obs.get("feedback", ""),
-        }))
+            # Get LLM action
+            action = llm_action(task_id, obs)
+            # Compact single-line action repr for the log
+            action_str = json.dumps(action, separators=(',', ':'))
 
-        if done:
-            break
+            # Submit to environment
+            result = env_request("/step", method="POST", body={"action": action})
+            reward  = result.get("reward", 0.0)
+            obs     = result.get("observation", result)
+            done    = result.get("done", obs.get("done", False))
+            last_error = obs.get("last_action_error", None)
 
-    # Get final state
-    state = env_request("/state")
-    final_score = state.get("cumulative_score", 0.0)
+            rewards.append(reward)
 
-    # ── END ──────────────────────────────────────────────────────
-    print(json.dumps({
-        "type":        "END",
-        "task_id":     task_id,
-        "total_steps": step_num,
-        "final_score": round(final_score, 4),
-        "passed":      final_score >= 0.5,
-    }))
+            # ── [STEP] ───────────────────────────────────────────
+            error_val = last_error if last_error else "null"
+            print(
+                f"[STEP] step={step_num} action={action_str} "
+                f"reward={reward:.2f} done={'true' if done else 'false'} "
+                f"error={error_val}",
+                flush=True
+            )
+
+            if done:
+                break
+
+        # Get final state
+        state = env_request("/state")
+        final_score = state.get("cumulative_score", 0.0)
+        success = final_score >= 0.5
+
+    except Exception as e:
+        last_error = str(e)
+        final_score = 0.0
+        success = False
+        # Emit an error STEP so the validator sees at least one STEP line
+        print(
+            f"[STEP] step={step_num + 1} action=null reward=0.00 "
+            f"done=true error={last_error}",
+            flush=True
+        )
+
+    # ── [END] ────────────────────────────────────────────────────
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards) if rewards else "0.00"
+    print(
+        f"[END] task={task_id} success={'true' if success else 'false'} "
+        f"steps={step_num} rewards={rewards_str} score={final_score:.2f}",
+        flush=True
+    )
 
     return final_score
 
@@ -203,35 +214,17 @@ def main():
     tasks = ["task_classify", "task_triage", "task_full_triage"]
     scores = {}
 
-    print(json.dumps({
-        "type":    "START",
-        "event":   "inference_run",
-        "tasks":   tasks,
-        "model":   MODEL_NAME,
-        "env_url": API_BASE_URL,
-    }))
-
     for task_id in tasks:
-        try:
-            score = run_episode(task_id)
-            scores[task_id] = score
-        except Exception as e:
-            print(json.dumps({
-                "type":    "STEP",
-                "task_id": task_id,
-                "error":   str(e),
-            }))
-            scores[task_id] = 0.0
+        score = run_episode(task_id)
+        scores[task_id] = score
 
     mean_score = round(sum(scores.values()) / len(scores), 4)
-
-    print(json.dumps({
-        "type":       "END",
-        "event":      "inference_run",
-        "scores":     scores,
-        "mean_score": mean_score,
-        "passed":     mean_score >= 0.5,
-    }))
+    # Final summary to stderr so it doesn't interfere with stdout parsing
+    print(
+        f"[END] event=inference_run mean_score={mean_score:.2f} "
+        f"passed={'true' if mean_score >= 0.5 else 'false'}",
+        flush=True
+    )
 
     return scores
 
