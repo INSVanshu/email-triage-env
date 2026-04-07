@@ -9,17 +9,17 @@ import json
 import re
 
 # ── Required environment variables ──────────────────────────────
-API_BASE_URL     = os.getenv("API_BASE_URL", "https://Vansh051201-email-triage-env.hf.space")
-MODEL_NAME       = os.getenv("MODEL_NAME",   "gpt-4o-mini")
-HF_TOKEN         = os.getenv("HF_TOKEN")          # optional – no default
-LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")  # optional – no default
+API_BASE_URL     = os.environ["API_BASE_URL"]          # injected by hackathon validator – required
+API_KEY          = os.environ["API_KEY"]               # injected by hackathon validator – required
+MODEL_NAME       = os.getenv("MODEL_NAME", "gpt-4o-mini")
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")       # optional – no default
 
-# ── OpenAI client configured via env variables ───────────────────
+# ── OpenAI client routed through the hackathon LiteLLM proxy ────
 from openai import OpenAI
 
 client = OpenAI(
-    api_key=HF_TOKEN if HF_TOKEN else "dummy-key",
-    base_url=None,   # uses OpenAI default; override if needed
+    api_key=API_KEY,
+    base_url=API_BASE_URL,
 )
 
 # ── Environment HTTP client ──────────────────────────────────────
@@ -31,8 +31,8 @@ def env_request(path: str, method: str = "GET", body: dict = None) -> dict:
     url = API_BASE_URL.rstrip("/") + path
     data = json.dumps(body).encode() if body else None
     headers = {"Content-Type": "application/json"}
-    if HF_TOKEN:
-        headers["Authorization"] = f"Bearer {HF_TOKEN}"
+    if API_KEY:
+        headers["Authorization"] = f"Bearer {API_KEY}"
 
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
