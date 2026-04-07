@@ -23,12 +23,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = [
-    "pytest>=8.0.0",
-]
+dev = ["pytest>=8.0.0"]
 
 [project.scripts]
-server = "server.app:app"
+server = "server.app:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -41,7 +39,7 @@ include = ["server*"]
 [tool.openenv]
 name = "email-triage-env"
 version = "1.0.0"
-entry_point = "server.app:app"
+entry_point = "server.app:main"
 port = 7860
 sdk = "docker"
 multi_mode = true
