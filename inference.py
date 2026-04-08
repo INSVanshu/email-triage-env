@@ -9,7 +9,7 @@ import json
 import re
 
 # ── Environment variables — injected by the hackathon validator ──
-API_BASE_URL     = os.getenv("API_BASE_URL", "https://Vansh051201-email-triage-env.hf.space")
+API_BASE_URL     = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
 MODEL_NAME       = os.getenv("MODEL_NAME",   "gpt-4o-mini")
 API_KEY          = os.getenv("API_KEY")           # injected by validator — no default
 HF_TOKEN         = os.getenv("HF_TOKEN")          # optional — no default
