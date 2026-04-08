@@ -4,7 +4,7 @@ import json
 import urllib.request
 from openai import OpenAI
 
-# ── Environment variables (exactly matching sample) ──────────────
+# ── Environment variables (exactly matching organiser sample) ─────
 API_BASE_URL     = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
 MODEL_NAME       = os.getenv("MODEL_NAME",   "gpt-4.1-mini")
 HF_TOKEN         = os.getenv("HF_TOKEN")
@@ -13,13 +13,13 @@ LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 if HF_TOKEN is None:
     raise ValueError("HF_TOKEN environment variable is required")
 
-# ── OpenAI client (exactly matching sample) ──────────────────────
+# ── OpenAI client (exactly matching organiser sample) ─────────────
 client = OpenAI(
     base_url=API_BASE_URL,
     api_key=HF_TOKEN,
 )
 
-# ── Environment server URL ────────────────────────────────────────
+# ── Environment server URL (your HF Space) ────────────────────────
 ENV_URL = "https://Vansh051201-email-triage-env.hf.space"
 
 def env_post(path, body=None):
@@ -39,7 +39,7 @@ def env_get(path):
         return json.loads(r.read().decode())
 
 
-# ── LLM triage function ───────────────────────────────────────────
+# ── LLM triage ────────────────────────────────────────────────────
 
 SCHEMAS = {
     "task_classify": '{"action_type":"classify","category":"<spam|work|personal|newsletter|finance|support|unknown>"}',
@@ -68,11 +68,10 @@ def get_action(task_id: str, obs: dict) -> dict:
     try:
         return json.loads(raw)
     except Exception:
-        # Safe fallback
         text = (obs.get("subject","") + obs.get("body","")).lower()
-        cat  = "spam" if "lottery" in text or "prize" in text else \
-               "finance" if "invoice" in text or "billing" in text else \
-               "support" if "outage" in text or "alert" in text else \
+        cat  = "spam"       if any(w in text for w in ["lottery","prize","won"]) else \
+               "finance"    if any(w in text for w in ["invoice","billing","overdue"]) else \
+               "support"    if any(w in text for w in ["outage","alert","incident"]) else \
                "newsletter" if "unsubscribe" in text else "work"
         pri  = "high" if any(w in text for w in ["urgent","critical","overdue","outage"]) else "medium"
         if task_id == "task_classify":
@@ -86,13 +85,14 @@ def get_action(task_id: str, obs: dict) -> dict:
                 "draft_reply": "" if cat in ("spam","newsletter") else "Thank you, I will follow up shortly."}
 
 
-# ── Episode runner with required structured stdout output ─────────
+# ── Episode runner ────────────────────────────────────────────────
 
 def run_episode(task_id: str) -> float:
     print(f"[START] task={task_id} model={MODEL_NAME}", flush=True)
 
     obs      = env_post("/reset", {"task_id": task_id})
     step_num = 0
+    rewards  = []
 
     while not obs.get("done", False):
         step_num += 1
@@ -101,16 +101,28 @@ def run_episode(task_id: str) -> float:
         reward = result.get("reward", 0.0)
         obs    = result.get("observation", result)
         done   = result.get("done", obs.get("done", False))
+        error  = obs.get("last_action_error", None)
+        rewards.append(reward)
 
-        print(f"[STEP] task={task_id} step={step_num} reward={round(reward,4)} done={done}", flush=True)
+        print(
+            f"[STEP] step={step_num} action={json.dumps(action, separators=(',',':'))} "
+            f"reward={reward:.2f} done={'true' if done else 'false'} "
+            f"error={error if error else 'null'}",
+            flush=True
+        )
 
         if done:
             break
 
     state       = env_get("/state")
     final_score = state.get("cumulative_score", 0.0)
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards) if rewards else "0.00"
 
-    print(f"[END] task={task_id} score={round(final_score,4)} steps={step_num}", flush=True)
+    print(
+        f"[END] task={task_id} success={'true' if final_score >= 0.5 else 'false'} "
+        f"steps={step_num} rewards={rewards_str} score={final_score:.2f}",
+        flush=True
+    )
     return final_score
 
 
@@ -120,22 +132,13 @@ if __name__ == "__main__":
     tasks  = ["task_classify", "task_triage", "task_full_triage"]
     scores = {}
 
-    print(f"[START] event=inference_run model={MODEL_NAME}", flush=True)
-
     for task_id in tasks:
         try:
             scores[task_id] = run_episode(task_id)
         except Exception as e:
-            print(f"[STEP] task={task_id} error={e}", flush=True)
+            print(f"[STEP] step=0 action=null reward=0.00 done=true error={e}", flush=True)
+            print(f"[END] task={task_id} success=false steps=0 rewards=0.00 score=0.00", flush=True)
             scores[task_id] = 0.0
 
     mean = round(sum(scores.values()) / len(scores), 4)
-
-    print(
-        f"[END] event=inference_run "
-        f"task_classify={scores.get('task_classify',0)} "
-        f"task_triage={scores.get('task_triage',0)} "
-        f"task_full_triage={scores.get('task_full_triage',0)} "
-        f"mean={mean}",
-        flush=True
-    )
+    print(f"[END] event=inference_run mean={mean:.2f} passed={'true' if mean >= 0.5 else 'false'}", flush=True)
