@@ -1,49 +1,53 @@
 """
 inference.py – Hackathon submission inference script.
-Follows the required structured logging format: [START] / [STEP] / [END]
-Uses OpenAI client configured via environment variables.
+Uses API_BASE_URL and API_KEY injected by the validator.
+Prints required [START] / [STEP] / [END] structured stdout blocks.
 """
 import os
 import sys
 import json
 import re
 
-# ── Required environment variables ──────────────────────────────
-API_BASE_URL     = os.environ["API_BASE_URL"]          # injected by hackathon validator – required
-API_KEY          = os.environ["API_KEY"]               # injected by hackathon validator – required
-MODEL_NAME       = os.getenv("MODEL_NAME", "gpt-4o-mini")
-LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")       # optional – no default
+# ── Environment variables — injected by the hackathon validator ──
+API_BASE_URL     = os.getenv("API_BASE_URL", "https://Vansh051201-email-triage-env.hf.space")
+MODEL_NAME       = os.getenv("MODEL_NAME",   "gpt-4o-mini")
+API_KEY          = os.getenv("API_KEY")           # injected by validator — no default
+HF_TOKEN         = os.getenv("HF_TOKEN")          # optional — no default
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")  # optional — no default
 
-# ── OpenAI client routed through the hackathon LiteLLM proxy ────
+# ── OpenAI client — uses API_BASE_URL and API_KEY from env ───────
 from openai import OpenAI
 
 client = OpenAI(
-    api_key=API_KEY,
+    api_key=API_KEY or HF_TOKEN or "dummy-key",
     base_url=API_BASE_URL,
 )
 
-# ── Environment HTTP client ──────────────────────────────────────
+# ── Environment HTTP client (no extra deps) ──────────────────────
 import urllib.request
 import urllib.error
 
-def env_request(path: str, method: str = "GET", body: dict = None) -> dict:
-    """Make HTTP request to the OpenEnv environment server."""
-    url = API_BASE_URL.rstrip("/") + path
-    data = json.dumps(body).encode() if body else None
-    headers = {"Content-Type": "application/json"}
-    if API_KEY:
-        headers["Authorization"] = f"Bearer {API_KEY}"
+ENV_BASE = os.getenv("API_BASE_URL", "https://Vansh051201-email-triage-env.hf.space")
 
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        body_text = e.read().decode()
-        raise RuntimeError(f"HTTP {e.code} on {url}: {body_text}")
+def env_post(path, body=None):
+    url  = ENV_BASE.rstrip("/") + path
+    data = json.dumps(body or {}).encode()
+    req  = urllib.request.Request(
+        url, data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read().decode())
+
+def env_get(path):
+    url = ENV_BASE.rstrip("/") + path
+    req = urllib.request.Request(url, method="GET")
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read().decode())
 
 
-# ── LLM triage agent ─────────────────────────────────────────────
+# ── LLM triage via the validator's proxy ─────────────────────────
 
 SYSTEM_PROMPT = (
     "You are an expert email triage assistant. "
@@ -71,17 +75,15 @@ SCHEMAS = {
     }
 }
 
-
-def llm_action(task_id: str, obs: dict) -> dict:
-    """Call the LLM to produce a triage action for the current email."""
+def llm_action(task_id, obs):
+    """Call the LLM proxy to produce a triage action."""
     schema = json.dumps(SCHEMAS[task_id], indent=2)
     user_prompt = (
         f"Triage this email. Return JSON matching this schema:\n{schema}\n\n"
-        f"Subject: {obs.get('subject', '')}\n"
-        f"From: {obs.get('sender', '')}\n"
-        f"Body:\n{obs.get('body', '')}"
+        f"Subject: {obs.get('subject','')}\n"
+        f"From: {obs.get('sender','')}\n"
+        f"Body:\n{obs.get('body','')}"
     )
-
     response = client.chat.completions.create(
         model=MODEL_NAME,
         messages=[
@@ -89,21 +91,16 @@ def llm_action(task_id: str, obs: dict) -> dict:
             {"role": "user",   "content": user_prompt},
         ],
         temperature=0.0,
-        max_tokens=500,
+        max_tokens=400,
     )
-
     raw = response.choices[0].message.content.strip()
     raw = re.sub(r"^```json\s*|^```\s*|```$", "", raw, flags=re.MULTILINE).strip()
-
     try:
         return json.loads(raw)
     except Exception:
-        # Fallback: rule-based if LLM returns unparseable output
         return _rule_fallback(task_id, obs)
 
-
-def _rule_fallback(task_id: str, obs: dict) -> dict:
-    """Simple keyword fallback used when LLM output can't be parsed."""
+def _rule_fallback(task_id, obs):
     text = (obs.get("subject","") + " " + obs.get("body","")).lower()
     if any(w in text for w in ["won","prize","lottery","processing fee"]):
         cat = "spam"
@@ -117,9 +114,7 @@ def _rule_fallback(task_id: str, obs: dict) -> dict:
         cat = "personal"
     else:
         cat = "work"
-
     pri = "high" if any(w in text for w in ["urgent","critical","action required","overdue","outage"]) else "medium"
-
     if task_id == "task_classify":
         return {"action_type": "classify", "category": cat}
     if task_id == "task_triage":
@@ -134,95 +129,69 @@ def _rule_fallback(task_id: str, obs: dict) -> dict:
     }
 
 
-# ── Episode runner with required structured logging ───────────────
+# ── Episode runner with required structured stdout logging ────────
 
-def run_episode(task_id: str) -> float:
-    """
-    Run one full episode against the environment server.
-    Logs in the required [START] / [STEP] / [END] structured format.
-    """
+def run_episode(task_id):
+    # [START] block
+    print(f"[START] task={task_id} model={MODEL_NAME}", flush=True)
+
+    obs = env_post("/reset", {"task_id": task_id})
     step_num = 0
-    rewards = []
-    last_error = None
 
-    # ── [START] ──────────────────────────────────────────────────
-    print(f"[START] task={task_id} env={API_BASE_URL} model={MODEL_NAME}", flush=True)
+    while not obs.get("done", False):
+        step_num += 1
+        action = llm_action(task_id, obs)
+        result = env_post("/step", {"action": action})
+        reward  = result.get("reward", 0.0)
+        obs     = result.get("observation", result)
+        done    = result.get("done", obs.get("done", False))
 
-    try:
-        # Reset environment
-        obs = env_request("/reset", method="POST", body={"task_id": task_id})
-
-        while not obs.get("done", False):
-            step_num += 1
-
-            # Get LLM action
-            action = llm_action(task_id, obs)
-            # Compact single-line action repr for the log
-            action_str = json.dumps(action, separators=(',', ':'))
-
-            # Submit to environment
-            result = env_request("/step", method="POST", body={"action": action})
-            reward  = result.get("reward", 0.0)
-            obs     = result.get("observation", result)
-            done    = result.get("done", obs.get("done", False))
-            last_error = obs.get("last_action_error", None)
-
-            rewards.append(reward)
-
-            # ── [STEP] ───────────────────────────────────────────
-            error_val = last_error if last_error else "null"
-            print(
-                f"[STEP] step={step_num} action={action_str} "
-                f"reward={reward:.2f} done={'true' if done else 'false'} "
-                f"error={error_val}",
-                flush=True
-            )
-
-            if done:
-                break
-
-        # Get final state
-        state = env_request("/state")
-        final_score = state.get("cumulative_score", 0.0)
-        success = final_score >= 0.5
-
-    except Exception as e:
-        last_error = str(e)
-        final_score = 0.0
-        success = False
-        # Emit an error STEP so the validator sees at least one STEP line
+        # [STEP] block
         print(
-            f"[STEP] step={step_num + 1} action=null reward=0.00 "
-            f"done=true error={last_error}",
+            f"[STEP] task={task_id} step={step_num} "
+            f"reward={round(reward,4)} done={done}",
             flush=True
         )
 
-    # ── [END] ────────────────────────────────────────────────────
-    rewards_str = ",".join(f"{r:.2f}" for r in rewards) if rewards else "0.00"
+        if done:
+            break
+
+    state = env_get("/state")
+    final_score = state.get("cumulative_score", 0.0)
+
+    # [END] block
     print(
-        f"[END] task={task_id} success={'true' if success else 'false'} "
-        f"steps={step_num} rewards={rewards_str} score={final_score:.2f}",
+        f"[END] task={task_id} score={round(final_score,4)} "
+        f"steps={step_num} passed={final_score >= 0.5}",
         flush=True
     )
 
     return final_score
 
 
-# ── Main ─────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────
 
 def main():
     tasks = ["task_classify", "task_triage", "task_full_triage"]
     scores = {}
 
+    print(f"[START] event=inference_run tasks={tasks} model={MODEL_NAME}", flush=True)
+
     for task_id in tasks:
-        score = run_episode(task_id)
-        scores[task_id] = score
+        try:
+            scores[task_id] = run_episode(task_id)
+        except Exception as e:
+            print(f"[STEP] task={task_id} error={str(e)}", flush=True)
+            scores[task_id] = 0.0
 
     mean_score = round(sum(scores.values()) / len(scores), 4)
-    # Final summary to stderr so it doesn't interfere with stdout parsing
+
     print(
-        f"[END] event=inference_run mean_score={mean_score:.2f} "
-        f"passed={'true' if mean_score >= 0.5 else 'false'}",
+        f"[END] event=inference_run "
+        f"task_classify={scores.get('task_classify',0)} "
+        f"task_triage={scores.get('task_triage',0)} "
+        f"task_full_triage={scores.get('task_full_triage',0)} "
+        f"mean={mean_score}",
         flush=True
     )
 
