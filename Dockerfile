@@ -1,13 +1,12 @@
-# Email Triage OpenEnv — REBUILD FORCED: 1775932961
+# REBUILD: 1775933569
 FROM python:3.11-slim
-LABEL org.opencontainers.image.title="Email Triage OpenEnv"
 RUN useradd -m -u 1000 appuser
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-RUN touch server/__init__.py && chown -R appuser:appuser /app
+RUN mkdir -p server && touch server/__init__.py
+RUN chown -R appuser:appuser /app
 USER appuser
 EXPOSE 7860
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3   CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:7860/health')"
-CMD ["uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "7860", "--workers", "1"]
+CMD ["uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "7860"]
